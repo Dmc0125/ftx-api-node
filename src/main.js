@@ -3,60 +3,58 @@ const Websocket = require('ws');
 const qs = require('qs');
 const crypto = require('crypto');
 
-function Ftx({ API_KEY, SECRET_KEY, SUBACCOUNT }) {
-  this.API_URL = 'https://ftx.com/api';
-  this.WS_URL = 'wss://ftx.com/ws/';
+class Ftx {
+  constructor({ API_KEY, SECRET_KEY, SUBACCOUNT }) {
+    this.API_URL = 'https://ftx.com/api';
+    this.WS_URL = 'wss://ftx.com/ws/';
 
-  this.API_KEY = API_KEY;
-  this.SECRET_KEY = SECRET_KEY;
-  this.SUBACCOUNT = decodeURI(SUBACCOUNT) === SUBACCOUNT ? encodeURI(SUBACCOUNT) : SUBACCOUNT;
+    this.API_KEY = API_KEY;
+    this.SECRET_KEY = SECRET_KEY;
+    this.SUBACCOUNT = decodeURI(SUBACCOUNT) === SUBACCOUNT ? encodeURI(SUBACCOUNT) : SUBACCOUNT;
 
-  const websocket = null;
-  let timeDiff = null;
+    /**
+     *  @private
+     */
+    this._websocket = null;
+    /**
+     *  @private
+     */
+    this._onMessageFunctions = [];
 
-  const setTimeDiff = () => {
+    /**
+     *  @private
+     */
+    this._timeDiff = null;
+  }
+
+  /**
+   *  @private
+   */
+  _setTimeDiff() {
     const TIME_URL = 'https://otc.ftx.com/api/time';
 
     return new Promise((resolve) => {
       fetch({ url: TIME_URL }, (data) => {
-        timeDiff = new Date(data.result).getTime() - new Date().getTime();
+        this._timeDiff = new Date(data.result).getTime() - new Date().getTime();
         resolve();
       });
     });
-  };
+  }
 
-  const getTimestamp = () => {
-    if (timeDiff) {
-      return new Date().getTime() + timeDiff;
-    }
+  /**
+   * @private
+   */
+  _encode(totalParams, key) {
+    return crypto
+      .createHmac('sha256', `${key}`)
+      .update(totalParams)
+      .digest('hex');
+  }
 
-    return new Date().getTime();
-  };
-
-  this.init = async () => {
-    await setTimeDiff();
-  };
-
-  const logger = (logType, ...params) => {
-    if (typeof console[logType] !== 'function') {
-      console.log(...params);
-      return;
-    }
-
-    console[logType](...params);
-  };
-
-  const encode = (totalParams, key) => crypto
-    .createHmac('sha256', `${key}`)
-    .update(totalParams)
-    .digest('hex');
-
-  const ftxFetch = async ({ endpoint, method, headers }, signed, options) => {
-    if (!timeDiff) {
-      logger('error', 'Time diff is not defined');
-      throw Error('Time diff is not defined');
-    }
-
+  /**
+   * @private
+   */
+  async _ftxFetch({ endpoint, method, headers }, signed, options) {
     const requestOptions = {
       headers,
       url: `${this.API_URL}${endpoint}?${qs.stringify(options)}`,
@@ -72,14 +70,15 @@ function Ftx({ API_KEY, SECRET_KEY, SUBACCOUNT }) {
       // eslint-disable-next-line prefer-destructuring
       requestOptions.url = requestOptions.url.split('?')[0];
 
-      const ts = getTimestamp();
+      await this._setTimeDiff();
+      const ts = new Date().getTime() + this._timeDiff;
 
       let signatureKey = `${ts}${requestOptions.method}/api${endpoint}`;
       if (options && Object.keys(options)) {
         signatureKey += JSON.stringify(options);
       }
 
-      const signature = encode(signatureKey, this.SECRET_KEY);
+      const signature = this._encode(signatureKey, this.SECRET_KEY);
       requestOptions.headers = {
         ...requestOptions.headers,
         'FTX-KEY': this.API_KEY,
@@ -104,24 +103,25 @@ function Ftx({ API_KEY, SECRET_KEY, SUBACCOUNT }) {
         reject(error);
       }
     });
-  };
+  }
 
-  this.spot = {
-    /* ---- SIGNED ---- */
+  get spot() {
+    return {
+      /* ---- SIGNED ---- */
 
-    async getUserBalances() {
-      const endpoint = '/wallet/balances';
+      getUserBalances: async () => {
+        const endpoint = '/wallet/balances';
 
-      const balances = await ftxFetch({ endpoint }, true);
+        const balances = await this._ftxFetch({ endpoint }, true);
 
-      return balances.result.map(({ coin, availableWithoutBorrow, total }) => ({
-        asset: coin,
-        available: availableWithoutBorrow,
-        inOrder: total - availableWithoutBorrow,
-      }));
-    },
+        return balances.result.map(({ coin, availableWithoutBorrow, total }) => ({
+          asset: coin,
+          available: availableWithoutBorrow,
+          inOrder: total - availableWithoutBorrow,
+        }));
+      },
 
-    /**
+      /**
      * Send order
      *
      * @param {string} market
@@ -130,110 +130,202 @@ function Ftx({ API_KEY, SECRET_KEY, SUBACCOUNT }) {
      * @param {number} size
      * @param {{}} options
      */
-    async sendOrder(market, side, type, size, options) {
-      const newOrderEndpoint = '/orders';
+      sendOrder: async (market, side, type, size, options) => {
+        const newOrderEndpoint = '/orders';
 
-      const _options = {
-        market,
-        side: side.toLowerCase(),
-        type: type.toLowerCase(),
-        size,
-      };
+        const _options = {
+          market,
+          side: side.toLowerCase(),
+          type: type.toLowerCase(),
+          size,
+        };
 
-      if (typeof option === 'object') {
-        Object.assign(_options, options);
-      }
+        if (typeof option === 'object') {
+          Object.assign(_options, options);
+        }
 
-      if (_options.type === 'market') {
-        _options.price = null;
-      }
+        if (_options.type === 'market') {
+          _options.price = null;
+        }
 
-      const data = await ftxFetch({ endpoint: newOrderEndpoint, method: 'POST' }, true, _options);
+        const data = await this._ftxFetch({ endpoint: newOrderEndpoint, method: 'POST' }, true, _options);
 
-      return data.result;
-    },
+        return data.result;
+      },
 
-    /* ---- UNSIGNED ---- */
+      /* ---- UNSIGNED ---- */
 
-    /**
+      /**
      * Get spot candlesticks data
      *
      * @param {string} marketName
      * @param {'15s' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d'} timeframe
-     * @param {{ start_time?: number; end_time?: number; limit?: number } | undefined} options
+     * @param {{ startTime?: number; endTime?: number; limit?: number } | undefined} options
      */
-    async candlesticks(marketName, timeframe, options = undefined) {
-      let resolution;
+      candlesticks: async (marketName, timeframe, options = undefined) => {
+        const resolution = this._getResolution(timeframe);
 
-      switch (timeframe) {
-        case '15s':
-          resolution = 15;
-          break;
-        case '1m':
-          resolution = 60;
-          break;
-        case '5m':
-          resolution = 60 * 5;
-          break;
-        case '15m':
-          resolution = 60 * 15;
-          break;
-        case '1h':
-          resolution = 60 * 60;
-          break;
-        case '4h':
-          resolution = 60 * 60 * 4;
-          break;
-        case '1d':
-          resolution = 60 * 60 * 24;
-          break;
-        default:
-          resolution = 1;
+        const _options = {
+          resolution,
+        };
+
+        if (typeof options === 'object') {
+          Object.assign(_options, options);
+        }
+
+        const candlesticksEndpoint = `/markets/${marketName}/candles`;
+
+        const { result: candlesticks } = await this._ftxFetch({ endpoint: candlesticksEndpoint }, false, _options);
+
+        return candlesticks.map(({
+          time, open, high, low, close, volume,
+        }) => ({
+          volume,
+          openTime: time,
+          closeTime: time + resolution * 1000 - 1,
+          o: open,
+          h: high,
+          l: low,
+          c: close,
+        }));
+      },
+
+      singleMarket: async (marketName) => {
+        const singleMarketEndpoint = `/markets/${marketName}`;
+
+        const marketData = await this._ftxFetch(({ endpoint: singleMarketEndpoint }));
+
+        return marketData.result;
+      },
+    };
+  }
+
+  get spotWebsockets() {
+    // const initWebsocket = () => {
+    //   this._websocket = new Websocket(this.WS_URL);
+
+    //   this._websocket.on('open', () => {
+    //     this._logger('info', 'Connected to websocket');
+    //   });
+
+    //   this._websocket.on('message', (msgJSON) => {
+    //     const msg = JSON.parse(msgJSON);
+
+    //     this._logger('info', msg);
+    //     // if (msg.data) {
+    //     // }
+    //   });
+    // };
+
+    // const subscribe = () => {
+    //   if (this._websocket && this._websocket.readyState === 0) {
+    //     setTimeout(() => {
+    //       this._websocket.send(JSON.stringify({
+    //         op: 'subscribe',
+    //         channel: 'ticker',
+    //         market: 'BTC-PERP',
+    //       }));
+    //     }, 5000);
+    //   }
+    // };
+
+    // if (!this._websocket) {
+    //   initWebsocket();
+    // }
+
+    const callCallback = (cb, arg) => {
+      if (typeof cb === 'function') {
+        cb(arg);
       }
+    };
 
-      const _options = {
-        resolution,
-      };
+    const getExchangeTime = async () => {
+      await this._setTimeDiff();
+      return new Date().getTime() + this._timeDiff;
+    };
 
-      if (typeof options === 'object') {
-        Object.assign(_options, options);
-      }
+    return {
+      candlesticks: ({ market, timeframe }, callback) => {
+        let candlesticksStream;
 
-      const candlesticksEndpoint = `/markets/${marketName}/candles`;
+        this.spot.candlesticks(market, timeframe, { limit: 2 }).then(async (data) => {
+          const [prevCandle, currentCandle] = data;
 
-      const { result: candlesticks } = await ftxFetch({ endpoint: candlesticksEndpoint }, false, _options);
+          callCallback(callback, prevCandle);
 
-      return candlesticks.map(({
-        time, open, high, low, close, volume,
-      }) => ({
-        volume,
-        openTime: time,
-        closeTime: time + resolution * 1000 - 1,
-        o: open,
-        h: high,
-        l: low,
-        c: close,
-      }));
-    },
+          let currentExchangeTime = await getExchangeTime();
+          const nextCandleOpen = currentCandle.closeTime + 1000 - currentExchangeTime;
 
-    async singleMarket(marketName) {
-      const singleMarketEndpoint = `/markets/${marketName}`;
+          setTimeout(async () => {
+            const resolution = this._getResolution(timeframe);
 
-      const marketData = await ftxFetch(({ endpoint: singleMarketEndpoint }));
+            currentExchangeTime = await getExchangeTime();
 
-      return marketData.result;
-    },
-  };
+            this.spot.candlesticks(market, timeframe, { limit: 2, endTime: currentExchangeTime }).then((nextData) => {
+              callCallback(callback, nextData[0]);
+            });
 
-  this.spotWebsockets = {
-    get() {
-      return {
-        candlesticks() {
+            // eslint-disable-next-line no-unused-vars
+            candlesticksStream = setInterval(async () => {
+              currentExchangeTime = await getExchangeTime();
 
-        },
-      };
-    },
-  };
+              this.spot.candlesticks(market, timeframe, { limit: 2, endTime: currentExchangeTime }).then((nextData) => {
+                callCallback(callback, nextData[0]);
+              });
+            }, resolution * 1000);
+          }, nextCandleOpen);
+        });
+      },
+      markets: () => {},
+    };
+  }
+
+  /**
+   * @private
+   */
+  _logger(logType, ...params) {
+    if (typeof console[logType] !== 'function') {
+      console.log(...params);
+      return;
+    }
+
+    console[logType](...params);
+  }
+
+  /**
+   * @private
+   */
+  _getResolution(timeframe) {
+    let resolution;
+
+    switch (timeframe) {
+      case '15s':
+        resolution = 15;
+        break;
+      case '1m':
+        resolution = 60;
+        break;
+      case '5m':
+        resolution = 60 * 5;
+        break;
+      case '15m':
+        resolution = 60 * 15;
+        break;
+      case '1h':
+        resolution = 60 * 60;
+        break;
+      case '4h':
+        resolution = 60 * 60 * 4;
+        break;
+      case '1d':
+        resolution = 60 * 60 * 24;
+        break;
+      default:
+        resolution = 1;
+    }
+
+    return resolution;
+  }
 }
 
 module.exports = Ftx;
