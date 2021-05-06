@@ -153,6 +153,31 @@ class Ftx {
         return data.result;
       },
 
+      /**
+       * Convert
+       *
+       * @param {String} fromCoin
+       * @param {String} toCoin
+       * @param {Number} size
+       */
+      convert: async (fromCoin, toCoin, size) => {
+        const quoteEndpoint = '/otc/quotes';
+
+        const { result } = await this._ftxFetch({ endpoint: quoteEndpoint, method: 'POST' }, true, {
+          fromCoin,
+          toCoin,
+          size,
+        });
+
+        if (result.quoteId) {
+          await this._ftxFetch({ endpoint: `${quoteEndpoint}/${result.quoteId}/accept`, method: 'POST' }, true);
+        }
+
+        const { result: quoteStatus } = await this._ftxFetch({ endpoint: `${quoteEndpoint}/${result.quoteId}`, method: 'GET' }, true);
+
+        return quoteStatus;
+      },
+
       /* ---- UNSIGNED ---- */
 
       /**
