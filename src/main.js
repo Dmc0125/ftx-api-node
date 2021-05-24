@@ -3,14 +3,29 @@ const Websocket = require('ws');
 const qs = require('qs');
 const crypto = require('crypto');
 
+/**
+ * @typedef {'15s' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d'} Timeframe
+ */
+
 class Ftx {
-  constructor({ API_KEY, SECRET_KEY, SUBACCOUNT }) {
+  /**
+   * @param {{ API_KEY: string; SECRET_KEY: string; SUBACCOUNT?: string }} options
+   */
+  constructor(options = undefined) {
     this.API_URL = 'https://ftx.com/api';
     this.WS_URL = 'wss://ftx.com/ws/';
 
-    this.API_KEY = API_KEY;
-    this.SECRET_KEY = SECRET_KEY;
-    this.SUBACCOUNT = decodeURI(SUBACCOUNT) === SUBACCOUNT ? encodeURI(SUBACCOUNT) : SUBACCOUNT;
+    this.API_KEY = undefined;
+    this.SECRET_KEY = undefined;
+    this.SUBACCOUNT = undefined;
+
+    if (options) {
+      const { API_KEY, SECRET_KEY, SUBACCOUNT } = options;
+
+      this.API_KEY = API_KEY;
+      this.SECRET_KEY = SECRET_KEY;
+      this.SUBACCOUNT = decodeURI(SUBACCOUNT) === SUBACCOUNT ? encodeURI(SUBACCOUNT) : SUBACCOUNT;
+    }
 
     /**
      *  @private
@@ -19,7 +34,7 @@ class Ftx {
     /**
      *  @private
      */
-    this._onMessageFunctions = [];
+    this._websocketCallbacks = {};
 
     /**
      *  @private
@@ -109,14 +124,17 @@ class Ftx {
     return {
       /* ---- SIGNED ---- */
 
-      getUserBalances: async () => {
+      /**
+       * @returns {{ asset: string; available: number; inOrder: number }[]}
+       */
+      accountBalances: async () => {
         const endpoint = '/wallet/balances';
 
         const balances = await this._ftxFetch({ endpoint }, true);
 
         return balances.result.map(({ coin, availableWithoutBorrow, total }) => ({
           asset: coin,
-          available: availableWithoutBorrow,
+          available: +availableWithoutBorrow,
           inOrder: total - availableWithoutBorrow,
         }));
       },
@@ -140,7 +158,7 @@ class Ftx {
           size,
         };
 
-        if (typeof option === 'object') {
+        if (typeof options === 'object') {
           Object.assign(_options, options);
         }
 
@@ -150,15 +168,15 @@ class Ftx {
 
         const data = await this._ftxFetch({ endpoint: newOrderEndpoint, method: 'POST' }, true, _options);
 
-        return data.result;
+        return data;
       },
 
       /**
        * Convert
        *
-       * @param {String} fromCoin
-       * @param {String} toCoin
-       * @param {Number} size
+       * @param {string} fromCoin
+       * @param {string} toCoin
+       * @param {number} size
        */
       convert: async (fromCoin, toCoin, size) => {
         const quoteEndpoint = '/otc/quotes';
@@ -184,8 +202,8 @@ class Ftx {
      * Get spot candlesticks data
      *
      * @param {string} marketName
-     * @param {'15s' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d'} timeframe
-     * @param {{ startTime?: number; endTime?: number; limit?: number } | undefined} options
+     * @param {Timeframe} timeframe
+     * @param {{ startTime?: number; endTime?: number; limit?: number }} options
      */
       candlesticks: async (marketName, timeframe, options = undefined) => {
         const resolution = this._getResolution(timeframe);
@@ -215,53 +233,77 @@ class Ftx {
         }));
       },
 
+      /**
+       * Single market
+       *
+       * @param {string} marketName
+       */
       singleMarket: async (marketName) => {
         const singleMarketEndpoint = `/markets/${marketName}`;
 
         const marketData = await this._ftxFetch(({ endpoint: singleMarketEndpoint }));
 
-        return marketData.result;
+        return marketData;
+      },
+
+      /**
+       * Orderbook
+       *
+       * @param {string} marketName
+       * @param {{ depth?: number }} options
+       */
+      orderbook: async (marketName, options = undefined) => {
+        const orderbookEndpoint = `/markets/${marketName}/orderbook`;
+
+        if (options && options.depth) {
+          const orderbookData = await this._ftxFetch({ endpoint: orderbookEndpoint }, false, options);
+          return orderbookData;
+        }
+
+        const orderbookData = await this._ftxFetch({ endpoint: orderbookEndpoint });
+        return orderbookData;
       },
     };
   }
 
   get spotWebsockets() {
-    // const initWebsocket = () => {
-    //   this._websocket = new Websocket(this.WS_URL);
-
-    //   this._websocket.on('open', () => {
-    //     this._logger('info', 'Connected to websocket');
-    //   });
-
-    //   this._websocket.on('message', (msgJSON) => {
-    //     const msg = JSON.parse(msgJSON);
-
-    //     this._logger('info', msg);
-    //     // if (msg.data) {
-    //     // }
-    //   });
-    // };
-
-    // const subscribe = () => {
-    //   if (this._websocket && this._websocket.readyState === 0) {
-    //     setTimeout(() => {
-    //       this._websocket.send(JSON.stringify({
-    //         op: 'subscribe',
-    //         channel: 'ticker',
-    //         market: 'BTC-PERP',
-    //       }));
-    //     }, 5000);
-    //   }
-    // };
-
-    // if (!this._websocket) {
-    //   initWebsocket();
-    // }
-
     const callCallback = (cb, arg) => {
       if (typeof cb === 'function') {
         cb(arg);
       }
+    };
+
+    const initWebsocket = () => {
+      this._websocket = new Websocket(this.WS_URL);
+
+      this._websocket.on('open', () => {
+        this._logger('info', '💹 Connected to FTX websocket');
+      });
+
+      this._websocket.on('message', (msgJSON) => {
+        const msg = JSON.parse(msgJSON);
+
+        if (msg && msg.channel && msg.market) {
+          const callbackId = `${msg.channel}-${msg.market}`;
+
+          const cb = this._websocketCallbacks[callbackId];
+
+          if (cb) {
+            callCallback(cb, msg);
+          }
+        }
+      });
+    };
+
+    const subscribe = (channel, market, cb) => {
+      if (this._websocket && this._websocket.readyState === 0) {
+        setTimeout(() => {
+          subscribe(channel, market, cb);
+        }, 5000);
+        return;
+      }
+
+      this._sendMessage(channel, market, cb);
     };
 
     const getExchangeTime = async () => {
@@ -270,6 +312,52 @@ class Ftx {
     };
 
     return {
+      /**
+       * Orderbook stream
+       *
+       * @param {string[]} markets
+       * @param {function} callback
+       */
+      orderbook: (markets, callback) => {
+        if (!this._websocket) {
+          initWebsocket();
+        }
+
+        const channel = 'orderbook';
+
+        for (let i = 0; i < markets.length; i += 1) {
+          const market = markets[i];
+
+          subscribe(channel, market, callback);
+        }
+      },
+
+      /**
+       * Ticker stream
+       *
+       * @param {string[]} markets
+       * @param {function} callback
+       */
+      ticker: (markets, callback) => {
+        if (!this._websocket) {
+          initWebsocket();
+        }
+
+        const channel = 'ticker';
+
+        for (let i = 0; i < markets.length; i += 1) {
+          const market = markets[i];
+
+          subscribe(channel, market, callback);
+        }
+      },
+
+      /**
+       * Candlesticks stream
+       *
+       * @param {{ market: string; timeframe: Timeframe }} settings
+       * @param {function} callback
+       */
       candlesticks: ({ market, timeframe }, callback) => {
         let candlesticksStream;
 
@@ -301,19 +389,43 @@ class Ftx {
           }, nextCandleOpen);
         });
       },
-      markets: () => {},
     };
   }
 
   /**
    * @private
    */
+  _sendMessage(channel, market, cb) {
+    this._websocket.send(JSON.stringify({
+      channel,
+      market,
+      op: 'subscribe',
+    }));
+
+    this._setCallback(channel, market, cb);
+  }
+
+  /**
+   * @private
+   */
+  _setCallback(channel, market, callback) {
+    const id = `${channel}-${market}`;
+
+    this._websocketCallbacks[id] = callback;
+  }
+
+  /**
+   * @private
+   */
   _logger(logType, ...params) {
+    // eslint-disable-next-line no-console
     if (typeof console[logType] !== 'function') {
+      // eslint-disable-next-line no-console
       console.log(...params);
       return;
     }
 
+    // eslint-disable-next-line no-console
     console[logType](...params);
   }
 
