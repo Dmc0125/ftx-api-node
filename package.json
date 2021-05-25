@@ -1,6 +1,6 @@
 {
   "name": "ftx-api-nodejs",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Ftx api for nodejs",
   "main": "src/main.js",
   "types": "types/ftx-api-nodejs/main.d.ts",
