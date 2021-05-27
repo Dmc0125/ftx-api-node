@@ -83,7 +83,7 @@ class Ftx {
 
       throw data;
     } catch (error) {
-      if (error.success) {
+      if (!error.success) {
         throw error.error;
       }
 
