@@ -18,7 +18,7 @@ class Ftx {
 
       this.API_KEY = API_KEY;
       this.SECRET_KEY = SECRET_KEY;
-      this.SUBACCOUNT = decodeURI(SUBACCOUNT) === SUBACCOUNT ? encodeURI(SUBACCOUNT) : SUBACCOUNT;
+      this.SUBACCOUNT = SUBACCOUNT && decodeURI(SUBACCOUNT) === SUBACCOUNT ? encodeURI(SUBACCOUNT) : SUBACCOUNT;
     }
 
     this._websocket = null;
@@ -81,10 +81,13 @@ class Ftx {
         return data;
       }
 
-      throw data.error;
+      throw data;
     } catch (error) {
-      // eslint-disable-next-line no-throw-literal
-      throw { success: false, error };
+      if (error.success) {
+        throw error.error;
+      }
+
+      throw error;
     }
   }
 
