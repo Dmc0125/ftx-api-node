@@ -151,21 +151,64 @@ class Ftx {
       /* ---- UNSIGNED ---- */
 
       candlesticks: async (marketName, timeframe, options = undefined) => {
+        const candlesticksEndpoint = `/markets/${marketName}/candles`;
+        const candlesticksLimit = 1500;
+
         const resolution = getResolution(timeframe);
+
+        if (resolution === 1) {
+          return [];
+        }
 
         const _options = {
           resolution,
         };
 
-        if (typeof options === 'object') {
-          Object.assign(_options, options);
+        let candlesticks = [];
+
+        const getCandlesticks = async (limit, endTime) => {
+          if (limit > candlesticksLimit) {
+            const { result: additionalCandlesticks } = await this._ftxFetch({ endpoint: candlesticksEndpoint }, false, {
+              ..._options,
+              limit: Math.min(limit, candlesticksLimit),
+              end_time: endTime,
+            });
+
+            candlesticks = [...additionalCandlesticks, ...candlesticks];
+
+            if (!additionalCandlesticks.length || additionalCandlesticks.length < candlesticksLimit) {
+              return;
+            }
+
+            await getCandlesticks(limit - candlesticksLimit, additionalCandlesticks[0].time / 1000 - 1);
+            return;
+          }
+
+          const { result: additionalCandlesticks } = await this._ftxFetch({ endpoint: candlesticksEndpoint }, false, {
+            ..._options,
+            limit,
+            end_time: endTime,
+          });
+
+          candlesticks = [...additionalCandlesticks, ...candlesticks];
+        };
+
+        const { endTime, startTime, limit } = options || {};
+
+        const _startTime = startTime / 1000;
+        const _endTime = endTime / 1000;
+
+        if (_endTime && _startTime) {
+          const difference = Math.round((_endTime - _startTime) / resolution);
+
+          await getCandlesticks(difference, _endTime);
+        } else if (_endTime && limit) {
+          await getCandlesticks(limit, _endTime);
+        } else {
+          await getCandlesticks(limit);
         }
 
-        const candlesticksEndpoint = `/markets/${marketName}/candles`;
-
-        const { result } = await this._ftxFetch({ endpoint: candlesticksEndpoint }, false, _options);
-
-        return result.map(({
+        return candlesticks.map(({
           time, open, high, low, close, volume,
         }) => ({
           volume,
@@ -183,7 +226,7 @@ class Ftx {
 
         const marketData = await this._ftxFetch(({ endpoint: singleMarketEndpoint }));
 
-        return marketData;
+        return marketData.result;
       },
 
       orderbook: async (marketName, options = undefined) => {
@@ -191,11 +234,11 @@ class Ftx {
 
         if (options && options.depth) {
           const orderbookData = await this._ftxFetch({ endpoint: orderbookEndpoint }, false, options);
-          return orderbookData;
+          return orderbookData.result;
         }
 
         const orderbookData = await this._ftxFetch({ endpoint: orderbookEndpoint });
-        return orderbookData;
+        return orderbookData.result;
       },
     };
   }
